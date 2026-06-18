@@ -67,19 +67,11 @@
 
   /* 스캐너 */
   #scanArea { display: none; }
-  #video {
-    width: 100%; border-radius: 12px; background: #000;
-    aspect-ratio: 3/4; object-fit: cover;
-  }
-  .scan-frame { position: relative; }
-  .scan-line {
-    position: absolute; left: 8%; right: 8%; height: 2px; background: var(--red);
-    top: 50%; box-shadow: 0 0 8px var(--red); animation: scan 2s ease-in-out infinite;
-  }
-  @keyframes scan { 0%,100%{top:30%} 50%{top:70%} }
+  #reader { width: 100%; }
+  #reader video { border-radius: 12px !important; }
   .last-scan {
     text-align: center; padding: 10px; font-size: 14px; font-weight: 600;
-    border-radius: 8px; margin-top: 10px; min-height: 20px;
+    border-radius: 8px; margin-top: 10px; min-height: 20px; white-space: pre-line;
   }
 
   /* 목록 */
@@ -153,10 +145,7 @@
         <button class="btn-dark" id="scanToggle" onclick="toggleScan()">📷 바코드 스캔 시작</button>
       </div>
       <div id="scanArea">
-        <div class="scan-frame" style="margin-top:10px">
-          <video id="video" playsinline muted></video>
-          <div class="scan-line"></div>
-        </div>
+        <div id="reader" style="margin-top:10px; width:100%; border-radius:12px; overflow:hidden;"></div>
         <div class="last-scan" id="lastScan">라벨 바코드를 비춰주세요</div>
       </div>
       <div class="manual-row">
@@ -180,26 +169,27 @@
 </div>
 
 <script>
-// ZXing 로딩 상태 추적 (CDN 실패 대비 다중 소스)
-window.__zxingReady = false;
-function loadZXing(srcs, idx) {
+// html5-qrcode 로딩 (CDN 실패 대비 다중 소스)
+window.__scanLibReady = false;
+window.__scanLibFailed = false;
+function loadScanLib(srcs, idx) {
   idx = idx || 0;
   if (idx >= srcs.length) {
-    window.__zxingFailed = true;
+    window.__scanLibFailed = true;
     var el = document.getElementById("lastScan");
-    if (el) { el.textContent = "⚠️ 스캔 라이브러리를 불러오지 못했습니다. 네트워크 확인 후 새로고침하세요."; el.style.color="#e24b4a"; }
+    if (el) { el.textContent = "⚠️ 스캔 라이브러리를 불러오지 못했습니다. 새로고침하세요."; el.style.color="#e24b4a"; }
     return;
   }
   var s = document.createElement("script");
   s.src = srcs[idx];
-  s.onload = function(){ window.__zxingReady = true; };
-  s.onerror = function(){ loadZXing(srcs, idx+1); };
+  s.onload = function(){ window.__scanLibReady = true; };
+  s.onerror = function(){ loadScanLib(srcs, idx+1); };
   document.head.appendChild(s);
 }
-loadZXing([
-  "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js",
-  "https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js",
-  "https://cdnjs.cloudflare.com/ajax/libs/zxing-library/0.20.0/index.min.js"
+loadScanLib([
+  "https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js",
+  "https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"
 ]);
 </script>
 <script>
@@ -282,8 +272,8 @@ function loadList() {
 // ===== 스캔 처리 =====
 function handleScan(rawValue) {
   let now = Date.now();
-  // 중복 방지: 같은 코드 1.5초 내 무시
-  if (rawValue === lastCode && now - lastTime < 1500) return;
+  // 중복 방지: 같은 코드 2초 내 무시 (연속 인식 엔진 대응)
+  if (rawValue === lastCode && now - lastTime < 2000) return;
   lastCode = rawValue; lastTime = now;
 
   let head = extractFromBarcode(rawValue);
@@ -364,77 +354,82 @@ document.getElementById("manualInput")?.addEventListener("keydown", e=>{
   if (e.key === "Enter") manualEnter();
 });
 
-// ===== 카메라 스캔 =====
+// ===== 카메라 스캔 (html5-qrcode 엔진) =====
+let html5qr = null;
+
 async function toggleScan() {
   if (scanning) { stopScan(); return; }
 
   // 라이브러리 준비 확인
-  if (window.__zxingFailed || typeof ZXing === "undefined") {
-    flash("스캔 라이브러리 로딩 실패 — 새로고침하거나 직접 입력을 쓰세요.", "var(--red)", "var(--red-bg)");
+  if (window.__scanLibFailed || typeof Html5Qrcode === "undefined") {
+    flash("스캔 라이브러리 로딩 중이거나 실패했습니다. 잠시 후 다시 누르거나 새로고침하세요.", "var(--red)", "var(--red-bg)");
     return;
   }
 
   document.getElementById("scanArea").style.display = "block";
   document.getElementById("scanToggle").textContent = "■ 스캔 중지";
   scanning = true;
-  flash("카메라 권한을 확인하는 중…", "var(--blue)", "var(--blue-bg)");
+  flash("카메라를 켜는 중…", "var(--blue)", "var(--blue-bg)");
 
-  // 1단계: 권한을 명시적으로 먼저 요청 (팝업 확실히 띄우기)
-  let stream = null;
+  try {
+    // CODE128 등 1D 바코드 위주로 형식 지정 (인식 속도/정확도 향상)
+    let formats = [];
+    try {
+      const F = Html5QrcodeSupportedFormats;
+      formats = [F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8,
+                 F.ITF, F.CODABAR, F.UPC_A, F.UPC_E, F.QR_CODE, F.DATA_MATRIX];
+    } catch (e) {}
 
-  // 진단: mediaDevices 자체가 있는지 먼저 확인
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    html5qr = new Html5Qrcode("reader", { formatsToSupport: formats, verbose: false });
+
+    // 긴 CODE128 바코드는 스캔영역(qrbox)을 넓고 낮게 잡아야 잘 읽힘
+    const config = {
+      fps: 12,
+      qrbox: function(vw, vh) {
+        let w = Math.floor(Math.min(vw, 480) * 0.92);
+        let h = Math.floor(Math.min(vh * 0.5, 200));
+        return { width: w, height: h };
+      },
+      aspectRatio: 1.3333,
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      videoConstraints: {
+        facingMode: "environment",
+        width: { ideal: 1920 }, height: { ideal: 1080 },
+        advanced: [{ focusMode: "continuous" }]
+      }
+    };
+
+    await html5qr.start(
+      { facingMode: "environment" },
+      config,
+      (decodedText, decodedResult) => {
+        handleScan(decodedText);
+      },
+      (errMsg) => { /* 프레임마다 실패는 무시 (정상) */ }
+    );
+
+    flash("라벨 바코드를 비춰주세요", "var(--txt2)", "transparent");
+
+  } catch (e) {
     scanning = false;
     document.getElementById("scanArea").style.display = "none";
     document.getElementById("scanToggle").textContent = "📷 바코드 스캔 시작";
-    let secure = window.isSecureContext ? "보안컨텍스트 OK" : "비보안(주소 확인필요)";
-    flash("이 브라우저에 카메라 API가 없습니다. (" + secure + ") / 주소: " + location.protocol, "var(--red)", "var(--red-bg)");
-    return;
-  }
-
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } }, audio: false
-    });
-  } catch (e) {
-    // 후면 카메라 지정이 실패하는 기기가 있어, 제약 없이 한 번 더 시도
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    } catch (e2) {
-      scanning = false;
-      document.getElementById("scanArea").style.display = "none";
-      document.getElementById("scanToggle").textContent = "📷 바코드 스캔 시작";
-      // 실제 에러 이름과 메시지를 그대로 노출 (진단용)
-      let nm = (e2 && e2.name) ? e2.name : "Unknown";
-      let mg = (e2 && e2.message) ? e2.message : String(e2);
-      flash("카메라 오류 [" + nm + "] " + mg, "var(--red)", "var(--red-bg)");
-      return;
-    }
-  }
-
-  // 2단계: 권한 받았으면 비디오에 직접 연결 + ZXing 디코딩
-  try {
-    let video = document.getElementById("video");
-    video.srcObject = stream;
-    await video.play();
-    flash("라벨 바코드를 비춰주세요", "var(--txt2)", "transparent");
-
-    codeReader = new ZXing.BrowserMultiFormatReader();
-    // 이미 열린 stream의 video에서 디코딩
-    codeReader.decodeFromVideoElement(video, (result, err) => {
-      if (result) handleScan(result.getText());
-    });
-  } catch (e) {
-    flash("스캔 시작 중 오류: " + (e && e.message ? e.message : e), "var(--red)", "var(--red-bg)");
+    let nm = (e && e.name) ? e.name : "";
+    let mg = (e && e.message) ? e.message : String(e);
+    let hint = "";
+    if (/NotAllowed|Permission/i.test(nm + mg)) hint = " → 주소창 자물쇠에서 카메라 허용 후 새로고침";
+    else if (/NotFound/i.test(nm + mg)) hint = " → 카메라를 찾지 못함";
+    else if (/NotReadable|in use/i.test(nm + mg)) hint = " → 다른 앱이 카메라 사용 중";
+    flash("카메라 오류: " + (nm ? "["+nm+"] " : "") + mg + hint, "var(--red)", "var(--red-bg)");
   }
 }
+
 function stopScan() {
   scanning = false;
-  if (codeReader) { try { codeReader.reset(); } catch(e){} }
-  let video = document.getElementById("video");
-  if (video && video.srcObject) {
-    try { video.srcObject.getTracks().forEach(t=>t.stop()); } catch(e){}
-    video.srcObject = null;
+  if (html5qr) {
+    try {
+      html5qr.stop().then(()=>{ try{ html5qr.clear(); }catch(e){} }).catch(()=>{});
+    } catch(e){}
   }
   document.getElementById("scanArea").style.display = "none";
   document.getElementById("scanToggle").textContent = "📷 바코드 스캔 시작";
