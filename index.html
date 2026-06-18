@@ -229,13 +229,6 @@ function extractFromBarcode(raw) {
   return head;
 }
 
-// 기본품번/접미사 분리: 영숫자 압축 후 앞 10자리=기본, 나머지=접미사
-function splitBaseSuffix(key) {
-  let k = key.replace(/[\s-]/g, "").toUpperCase();
-  if (k.length <= 10) return { base: k, suffix: "" };
-  return { base: k.slice(0, 10), suffix: k.slice(10) };
-}
-
 // ===== 목록 불러오기 =====
 function loadList() {
   let txt = document.getElementById("pasteInput").value.trim();
@@ -262,8 +255,7 @@ function loadList() {
     }
     let key = compareKey(pn);
     if (!key) continue;
-    let bs = splitBaseSuffix(key);
-    items.push({ raw: pn.trim(), key: key, base: bs.base, suffix: bs.suffix, need: qty, got: 0 });
+    items.push({ raw: pn.trim(), key: key, need: qty, got: 0 });
   }
   if (items.length === 0) { alert("인식된 품번이 없습니다. 형식을 확인해주세요."); return; }
   document.getElementById("setupArea").style.display = "none";
@@ -280,22 +272,22 @@ function handleScan(rawValue) {
   lastCode = rawValue; lastTime = now;
 
   let head = extractFromBarcode(rawValue);
-  let scanKey = compareKey(head);
-  let bs = splitBaseSuffix(scanKey);
+  let scanKey = compareKey(head);   // 비교용: 공백제거 + 대문자
+  if (!scanKey) { render(); return; }
 
-  // 매칭 우선순위:
-  // (1) 기본품번+접미사 완전일치  (2) DS만 차이나는 경우(예외 통과)
-  // (3) 그 외 접미사 차이 → 확인필요(노랑)  (4) 없음 → 잘못옴(빨강)
-  let exact = null, dsPass = null, suffixDiff = null;
+  // ===== 발주 리스트와 직접 대조 (자릿수/체계 무관) =====
+  // it.key = 발주 품번의 비교키(공백제거 대문자). 신형/구형/알파벳 품번 모두 그대로 비교.
+  let exact = null, dsPass = null, near = null, nearDist = 99;
+
   for (let it of items) {
-    if (it.base !== bs.base) continue;
-    if (it.suffix === bs.suffix) { exact = it; break; }
-    // DS 예외: 발주와 라벨의 차이가 'DS 유무'뿐일 때만 통과
-    // (한쪽 접미사가 DS, 다른쪽이 빈칸) 또는 (한쪽 DS, 다른쪽도 DS는 위에서 처리됨)
-    let pair = [it.suffix, bs.suffix].sort().join("|");
-    if (pair === "|DS") { if (!dsPass) dsPass = it; continue; }
-    // 그 외 접미사 차이 (AS, B, 색상코드 등) → 확인 필요 후보
-    if (!suffixDiff) suffixDiff = it;
+    let ik = it.key;
+    if (ik === scanKey) { exact = it; break; }            // 완전 일치
+    if (isDsOnlyDiff(ik, scanKey)) { if (!dsPass) dsPass = it; continue; } // DS만 차이
+    // 유사도: 길이 비슷하고 1~2글자만 다르면 "인식오류 의심" 후보
+    let d = editDistance(ik, scanKey);
+    if (d <= 2 && Math.abs(ik.length - scanKey.length) <= 2 && d < nearDist) {
+      near = it; nearDist = d;
+    }
   }
 
   let matched = exact || dsPass;
@@ -310,19 +302,42 @@ function handleScan(rawValue) {
       flash(`⚠️ ${matched.raw}  이미 수량 다 채움 (${matched.need}개)`, "var(--amber)", "var(--amber-bg)");
       beep(false);
     }
-  } else if (suffixDiff) {
-    // 기본품번은 같지만 접미사가 DS 외로 다름 → 사람이 확인
-    let wk = "확인필요: " + head + " (발주 " + suffixDiff.raw + ")";
+  } else if (near) {
+    // 비슷하지만 정확히 일치하지 않음 → 인식오류 의심, 사람이 라벨 보고 확인
+    let wk = "확인필요: 읽은값 " + head + " ↔ 발주 " + near.raw;
     wrongScans[wk] = (wrongScans[wk]||0) + 1;
-    flash(`⚠️ 접미사 다름 — 확인 필요\n라벨 ${head} / 발주 ${suffixDiff.raw}`, "var(--amber)", "var(--amber-bg)");
+    flash(`⚠️ 비슷하지만 다름 — 라벨 확인!\n읽은값 ${head}\n발주 ${near.raw}`, "var(--amber)", "var(--amber-bg)");
     beep(false);
   } else {
-    let wk = bs.base + (bs.suffix||"");
+    let wk = "목록없음: " + head;
     wrongScans[wk] = (wrongScans[wk]||0) + 1;
     flash(`❌ 목록에 없음: ${head}`, "var(--red)", "var(--red-bg)");
     beep(false);
   }
   render();
+}
+
+// DS 접미사 유무만 차이나는지 검사 (예: ABC123 ↔ ABC123DS)
+function isDsOnlyDiff(a, b) {
+  if (a === b) return false;
+  let longer = a.length >= b.length ? a : b;
+  let shorter = a.length >= b.length ? b : a;
+  return longer === shorter + "DS";
+}
+
+// 편집 거리(Levenshtein) — 인식오류로 몇 글자 틀렸는지 측정
+function editDistance(a, b) {
+  let m = a.length, n = b.length;
+  if (Math.abs(m - n) > 3) return 99; // 길이 차 크면 계산 생략
+  let dp = Array.from({length: m+1}, (_,i)=>[i, ...Array(n).fill(0)]);
+  for (let j=0;j<=n;j++) dp[0][j]=j;
+  for (let i=1;i<=m;i++){
+    for (let j=1;j<=n;j++){
+      let cost = a[i-1]===b[j-1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
+    }
+  }
+  return dp[m][n];
 }
 
 function flash(msg, color, bg) {
@@ -484,10 +499,9 @@ function render() {
     if (it.got >= it.need) { cls = "s-done"; chk = "✓"; done++; }
     else if (it.got > 0) { cls = "s-partial"; chk = "◐"; left += (it.need - it.got); }
     else { left += it.need; }
-    let suf = it.suffix ? `<small>접미사 ${it.suffix}</small>` : "";
     html += `<div class="item ${cls}">
       <div class="chk">${chk}</div>
-      <div class="pn">${it.raw}${suf}</div>
+      <div class="pn">${it.raw}</div>
       <div class="cnt">${it.got} / ${it.need}</div>
     </div>`;
   }
