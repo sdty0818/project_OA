@@ -142,8 +142,11 @@
 
     <div class="card" id="scanCard">
       <div class="btn-row">
-        <button class="btn-dark" id="scanToggle" onclick="toggleScan()">📷 바코드 스캔 시작</button>
+        <button class="btn-dark" id="scanToggle" onclick="toggleScan()">📷 실시간 스캔</button>
+        <button class="btn-dark" id="photoBtn" onclick="document.getElementById('photoInput').click()">📸 사진으로 스캔</button>
       </div>
+      <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none" onchange="scanFromPhoto(event)">
+      <p class="hint" style="margin-top:8px">실시간이 잘 안 잡히면 <b>사진으로 스캔</b>이 더 정확합니다. 바코드가 또렷하게 나오게 찍으세요.</p>
       <div id="scanArea">
         <div id="reader" style="margin-top:10px; width:100%; border-radius:12px; overflow:hidden;"></div>
         <div class="last-scan" id="lastScan">라벨 바코드를 비춰주세요</div>
@@ -382,12 +385,13 @@ async function toggleScan() {
 
     html5qr = new Html5Qrcode("reader", { formatsToSupport: formats, verbose: false });
 
-    // 긴 CODE128 바코드는 스캔영역(qrbox)을 넓고 낮게 잡아야 잘 읽힘
+    // 긴 CODE128 바코드는 스캔영역(qrbox)을 화면 거의 가득 넓게 잡아야 전체가 담김
     const config = {
-      fps: 12,
+      fps: 15,
       qrbox: function(vw, vh) {
-        let w = Math.floor(Math.min(vw, 480) * 0.92);
-        let h = Math.floor(Math.min(vh * 0.5, 200));
+        // 가로는 화면의 96%까지 최대한 넓게, 세로는 낮게 (바코드는 가로로 긴 형태)
+        let w = Math.floor(vw * 0.96);
+        let h = Math.floor(Math.min(vh * 0.45, 160));
         return { width: w, height: h };
       },
       aspectRatio: 1.3333,
@@ -413,7 +417,7 @@ async function toggleScan() {
   } catch (e) {
     scanning = false;
     document.getElementById("scanArea").style.display = "none";
-    document.getElementById("scanToggle").textContent = "📷 바코드 스캔 시작";
+    document.getElementById("scanToggle").textContent = "📷 실시간 스캔";
     let nm = (e && e.name) ? e.name : "";
     let mg = (e && e.message) ? e.message : String(e);
     let hint = "";
@@ -432,7 +436,43 @@ function stopScan() {
     } catch(e){}
   }
   document.getElementById("scanArea").style.display = "none";
-  document.getElementById("scanToggle").textContent = "📷 바코드 스캔 시작";
+  document.getElementById("scanToggle").textContent = "📷 실시간 스캔";
+}
+
+// ===== 사진으로 스캔 (정지 이미지 — 실시간보다 정확) =====
+async function scanFromPhoto(event) {
+  let file = event.target.files && event.target.files[0];
+  if (!file) return;
+  // 실시간 스캔 중이면 멈춤 (충돌 방지)
+  if (scanning) stopScan();
+
+  if (window.__scanLibFailed || typeof Html5Qrcode === "undefined") {
+    flash("스캔 라이브러리 로딩 중입니다. 잠시 후 다시 시도하세요.", "var(--red)", "var(--red-bg)");
+    event.target.value = "";
+    return;
+  }
+
+  document.getElementById("scanArea").style.display = "block";
+  flash("사진 분석 중…", "var(--blue)", "var(--blue-bg)");
+
+  // 파일 스캔 전용 인스턴스
+  let fileScanner = null;
+  try {
+    let formats = [];
+    try {
+      const F = Html5QrcodeSupportedFormats;
+      formats = [F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8,
+                 F.ITF, F.CODABAR, F.UPC_A, F.UPC_E, F.QR_CODE, F.DATA_MATRIX];
+    } catch (e) {}
+    fileScanner = new Html5Qrcode("reader", { formatsToSupport: formats, verbose: false });
+    let decoded = await fileScanner.scanFile(file, false);
+    handleScan(decoded);
+  } catch (e) {
+    flash("사진에서 바코드를 찾지 못했습니다. 바코드가 또렷하고 크게 나오게 다시 찍어보세요.", "var(--amber)", "var(--amber-bg)");
+  } finally {
+    if (fileScanner) { try { fileScanner.clear(); } catch(e){} }
+    event.target.value = ""; // 같은 사진 다시 선택 가능하게 초기화
+  }
 }
 
 // ===== 렌더링 =====
