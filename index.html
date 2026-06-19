@@ -275,22 +275,41 @@ function handleScan(rawValue) {
   let scanKey = compareKey(head);   // 비교용: 공백제거 + 대문자
   if (!scanKey) { render(); return; }
 
-  // ===== 발주 리스트와 직접 대조 (자릿수/체계 무관) =====
-  // it.key = 발주 품번의 비교키(공백제거 대문자). 신형/구형/알파벳 품번 모두 그대로 비교.
-  let exact = null, dsPass = null, near = null, nearDist = 99;
+  // ===== 발주 리스트와 대조 (자릿수/체계 무관, 꼬리표 무시) =====
+  // 품번은 항상 스캔값 맨 앞에 옴. 뒤에 붙는 꼬리표(EJ, LG02, 공백 등)는 전부 무시.
+  // 우선순위: (1)완전일치 (2)발주품번으로 시작=prefix (3)DS만차이 (4)유사(오인식의심) (5)없음
+  let exact = null, prefix = null, dsPass = null, near = null, nearDist = 99;
 
   for (let it of items) {
     let ik = it.key;
     if (ik === scanKey) { exact = it; break; }            // 완전 일치
+    // 스캔값이 발주품번으로 시작하면 통과 (꼬리표가 붙어온 경우)
+    // 단, 발주품번이 너무 짧으면(오매칭 위험) prefix 매칭 제외 — 5자 이상만
+    if (ik.length >= 5 && scanKey.startsWith(ik)) {
+      if (!prefix) prefix = it;
+      continue;
+    }
+    // 발주품번 + DS + 꼬리표 형태도 통과 (예: 발주 ABC123 ↔ 스캔 ABC123DS...)
+    if (ik.length >= 5 && scanKey.startsWith(ik + "DS")) {
+      if (!dsPass) dsPass = it;
+      continue;
+    }
     if (isDsOnlyDiff(ik, scanKey)) { if (!dsPass) dsPass = it; continue; } // DS만 차이
-    // 유사도: 길이 비슷하고 1~2글자만 다르면 "인식오류 의심" 후보
+    // 유사도: (a) 전체 비교  (b) 스캔값 앞부분(발주품번 길이)만 잘라 비교 — 꼬리표 붙은 오인식 대응
     let d = editDistance(ik, scanKey);
     if (d <= 2 && Math.abs(ik.length - scanKey.length) <= 2 && d < nearDist) {
       near = it; nearDist = d;
     }
+    // 스캔값이 더 길면(꼬리표 포함 가능) 앞부분만 떼서 한 번 더 비교
+    if (scanKey.length > ik.length) {
+      let dPre = editDistance(ik, scanKey.slice(0, ik.length));
+      if (dPre >= 1 && dPre <= 2 && dPre < nearDist) {
+        near = it; nearDist = dPre;
+      }
+    }
   }
 
-  let matched = exact || dsPass;
+  let matched = exact || prefix || dsPass;
 
   if (matched) {
     if (matched.got < matched.need) {
