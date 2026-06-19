@@ -265,10 +265,11 @@ function loadList() {
 }
 
 // ===== 스캔 처리 =====
-function handleScan(rawValue) {
+function handleScan(rawValue, source) {
+  source = source || "live";  // live(실시간) / photo(사진) / manual(수동입력)
   let now = Date.now();
-  // 중복 방지: 같은 코드 2초 내 무시 (연속 인식 엔진 대응)
-  if (rawValue === lastCode && now - lastTime < 2000) return;
+  // 중복 방지: 같은 코드 2초 내 무시 (연속 인식 엔진 대응). 단 사진/수동은 항상 처리.
+  if (source === "live" && rawValue === lastCode && now - lastTime < 2000) return;
   lastCode = rawValue; lastTime = now;
 
   let head = extractFromBarcode(rawValue);
@@ -328,10 +329,14 @@ function handleScan(rawValue) {
     flash(`⚠️ 비슷하지만 다름 — 라벨 확인!\n읽은값 ${head}\n발주 ${near.raw}`, "var(--amber)", "var(--amber-bg)");
     beep(false);
   } else {
-    let wk = "목록없음: " + head;
-    wrongScans[wk] = (wrongScans[wk]||0) + 1;
-    flash(`❌ 목록에 없음: ${head}`, "var(--red)", "var(--red-bg)");
-    beep(false);
+    // 목록에 없는 코드(QR·관리번호 등) → 완전히 무시.
+    // 실시간 스캔 중이면 화면도 건드리지 않고 조용히 넘어감(품번 바코드 잡힐 때까지).
+    // 단, 사진/수동 입력은 사용자가 의도적으로 넣은 것이므로 안내만 표시.
+    if (source === "manual" || source === "photo") {
+      flash(`해당 값은 발주 목록에 없습니다: ${head}`, "var(--txt2)", "var(--gray-bg)");
+    }
+    // wrongScans에 기록하지 않음 → "잘못 옴" 카운터 안 올라감
+    return; // render 불필요 (목록 상태 변화 없음)
   }
   render();
 }
@@ -384,7 +389,7 @@ function beep(ok) {
 function manualEnter() {
   let v = document.getElementById("manualInput").value.trim();
   if (!v) return;
-  handleScan(v);
+  handleScan(v, "manual");
   document.getElementById("manualInput").value = "";
 }
 document.getElementById("manualInput")?.addEventListener("keydown", e=>{
@@ -408,13 +413,32 @@ async function toggleScan() {
   scanning = true;
   flash("카메라를 켜는 중…", "var(--blue)", "var(--blue-bg)");
 
+  // ===== 빠른 경로: 브라우저 네이티브 BarcodeDetector 지원 시 직접 사용 =====
+  // 갤럭시/크롬 등에서 하드웨어급 속도. 아이폰/사파리 등 미지원이면 자동으로 html5-qrcode로.
+  let nativeOk = false;
+  try {
+    if ("BarcodeDetector" in window) {
+      let fmts = await window.BarcodeDetector.getSupportedFormats();
+      // 품번은 주로 code_128. 1D 바코드를 하나라도 지원하면 네이티브 사용
+      if (fmts && (fmts.includes("code_128") || fmts.includes("code_39") || fmts.includes("ean_13"))) {
+        nativeOk = await startNativeScan(fmts);
+      }
+    }
+  } catch (e) { nativeOk = false; }
+
+  if (nativeOk) {
+    flash("라벨 바코드를 비춰주세요 (고속 모드)", "var(--txt2)", "transparent");
+    return;
+  }
+
+  // ===== 폴백 경로: html5-qrcode (모든 브라우저 호환) =====
   try {
     // CODE128 등 1D 바코드 위주로 형식 지정 (인식 속도/정확도 향상)
     let formats = [];
     try {
       const F = Html5QrcodeSupportedFormats;
       formats = [F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8,
-                 F.ITF, F.CODABAR, F.UPC_A, F.UPC_E, F.QR_CODE, F.DATA_MATRIX];
+                 F.ITF, F.CODABAR, F.UPC_A, F.UPC_E];
     } catch (e) {}
 
     html5qr = new Html5Qrcode("reader", { formatsToSupport: formats, verbose: false });
@@ -441,7 +465,7 @@ async function toggleScan() {
       { facingMode: "environment" },
       config,
       (decodedText, decodedResult) => {
-        handleScan(decodedText);
+        handleScan(decodedText, "live");
       },
       (errMsg) => { /* 프레임마다 실패는 무시 (정상) */ }
     );
@@ -464,13 +488,90 @@ async function toggleScan() {
 
 function stopScan() {
   scanning = false;
+  // html5-qrcode 정리
   if (html5qr) {
     try {
       html5qr.stop().then(()=>{ try{ html5qr.clear(); }catch(e){} }).catch(()=>{});
     } catch(e){}
   }
+  // 네이티브 스캔 정리
+  if (nativeStream) {
+    try { nativeStream.getTracks().forEach(t=>t.stop()); } catch(e){}
+    nativeStream = null;
+  }
+  let rd = document.getElementById("reader");
+  if (rd) rd.innerHTML = "";
   document.getElementById("scanArea").style.display = "none";
   document.getElementById("scanToggle").textContent = "📷 실시간 스캔";
+}
+
+// ===== 네이티브 BarcodeDetector 스캔 (지원 브라우저에서 고속) =====
+let nativeStream = null;
+let nativeVideo = null;
+async function startNativeScan(supportedFmts) {
+  try {
+    // 1D 바코드 위주로 감지기 생성
+    let want = ["code_128","code_39","code_93","ean_13","ean_8","itf","codabar","upc_a","upc_e"]
+                 .filter(f => supportedFmts.includes(f));
+    let detector = new window.BarcodeDetector({ formats: want });
+
+    // 카메라 열기
+    nativeStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 }, height: { ideal: 1080 },
+        advanced: [{ focusMode: "continuous" }]
+      },
+      audio: false
+    });
+
+    // video 엘리먼트 구성
+    let reader = document.getElementById("reader");
+    reader.innerHTML = "";
+    nativeVideo = document.createElement("video");
+    nativeVideo.setAttribute("playsinline", "");
+    nativeVideo.muted = true;
+    nativeVideo.style.width = "100%";
+    nativeVideo.style.borderRadius = "12px";
+    reader.appendChild(nativeVideo);
+    nativeVideo.srcObject = nativeStream;
+    await nativeVideo.play();
+
+    // 연속 초점 적용 시도
+    try {
+      let track = nativeStream.getVideoTracks()[0];
+      let caps = track.getCapabilities ? track.getCapabilities() : {};
+      if (caps.focusMode && caps.focusMode.includes("continuous")) {
+        await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+      }
+    } catch (e) {}
+
+    // 프레임 검사 루프
+    let detecting = false;
+    async function tick() {
+      if (!scanning || !nativeStream) return;  // 중지되면 루프 종료
+      if (!detecting && nativeVideo.readyState >= 2) {
+        detecting = true;
+        try {
+          let codes = await detector.detect(nativeVideo);
+          if (codes && codes.length) {
+            for (let c of codes) {
+              if (c.rawValue) handleScan(c.rawValue, "live");
+            }
+          }
+        } catch (e) { /* 프레임 검출 실패는 무시 */ }
+        detecting = false;
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+    return true;
+
+  } catch (e) {
+    // 네이티브 실패 → 스트림 정리하고 false 반환(폴백으로 넘어감)
+    if (nativeStream) { try { nativeStream.getTracks().forEach(t=>t.stop()); } catch(_){}; nativeStream = null; }
+    return false;
+  }
 }
 
 // ===== 사진으로 스캔 (정지 이미지 — 실시간보다 정확) =====
@@ -500,7 +601,7 @@ async function scanFromPhoto(event) {
     } catch (e) {}
     fileScanner = new Html5Qrcode("reader", { formatsToSupport: formats, verbose: false });
     let decoded = await fileScanner.scanFile(file, false);
-    handleScan(decoded);
+    handleScan(decoded, "photo");
   } catch (e) {
     flash("사진에서 바코드를 찾지 못했습니다. 바코드가 또렷하고 크게 나오게 다시 찍어보세요.", "var(--amber)", "var(--amber-bg)");
   } finally {
