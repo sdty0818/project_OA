@@ -74,6 +74,16 @@
     border-radius: 8px; margin-top: 10px; min-height: 20px; white-space: pre-line;
   }
 
+  /* 인식 성공/주의 시 화면 전체 번쩍임 */
+  #flashOverlay {
+    position: fixed; inset: 0; z-index: 9999; pointer-events: none;
+    opacity: 0; background: var(--green);
+  }
+  #flashOverlay.show-ok { animation: flashOk 0.35s ease-out; }
+  #flashOverlay.show-warn { animation: flashWarn 0.45s ease-out; }
+  @keyframes flashOk { 0%{opacity:0} 25%{opacity:0.45} 100%{opacity:0} }
+  @keyframes flashWarn { 0%{opacity:0} 25%{opacity:0.5} 100%{opacity:0} }
+
   /* 목록 */
   .item {
     display: flex; align-items: center; gap: 10px; padding: 12px 12px;
@@ -111,6 +121,7 @@
 </style>
 </head>
 <body>
+<div id="flashOverlay"></div>
 <div class="wrap">
   <header>
     <h1>현장 부품 검수</h1>
@@ -371,17 +382,63 @@ function flash(msg, color, bg) {
   el.style.background = bg;
 }
 
-// 간단한 비프음 (Web Audio)
+// 피드백: 소리 + 진동 (현장에서 확실하게 인지)
 let audioCtx = null;
-function beep(ok) {
+function feedback(type) {
+  // type: "ok"(성공) / "warn"(확인필요·중복) 
+  beep(type);
+  vibrate(type);
+}
+
+function beep(type) {
+  // 진동 + 화면 번쩍임을 함께 발생 (소리가 작거나 안 들리는 환경 대비)
+  vibrate(type);
+  screenFlash(type);
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-    let o = audioCtx.createOscillator(), g = audioCtx.createGain();
-    o.connect(g); g.connect(audioCtx.destination);
-    o.frequency.value = ok ? 880 : 300;
-    g.gain.value = 0.15;
-    o.start();
-    setTimeout(()=>{ o.stop(); }, ok ? 90 : 180);
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    let now = audioCtx.currentTime;
+
+    if (type === "ok") {
+      // 성공: 짧고 높은 "삑" 두 번 살짝 (경쾌하게)
+      playTone(1320, now,       0.08, 0.32);   // 높은 톤
+      playTone(1760, now+0.09,  0.10, 0.32);   // 더 높은 톤 (상승감)
+    } else {
+      // 확인필요/중복: 낮고 둔한 톤 한 번 (주의 환기)
+      playTone(420, now, 0.22, 0.30);
+    }
+  } catch(e){}
+}
+
+function playTone(freq, startTime, dur, vol) {
+  let o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.connect(g); g.connect(audioCtx.destination);
+  o.type = "square";              // square파가 더 또렷하고 크게 들림
+  o.frequency.value = freq;
+  // 부드러운 시작/끝 (딱딱한 클릭음 방지)
+  g.gain.setValueAtTime(0.0001, startTime);
+  g.gain.exponentialRampToValueAtTime(vol, startTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, startTime + dur);
+  o.start(startTime);
+  o.stop(startTime + dur + 0.02);
+}
+
+function vibrate(type) {
+  try {
+    if (!navigator.vibrate) return;
+    if (type === "ok") navigator.vibrate(45);          // 성공: 짧고 가벼운 한 번 "지직"
+    else navigator.vibrate([30, 50, 30, 50, 30]);      // 확인필요: 여러 번 떨어 구분 (주의)
+  } catch(e){}
+}
+
+function screenFlash(type) {
+  try {
+    let ov = document.getElementById("flashOverlay");
+    if (!ov) return;
+    ov.style.background = (type === "ok") ? "var(--green)" : "var(--amber)";
+    ov.classList.remove("show-ok", "show-warn");
+    void ov.offsetWidth; // 리플로우로 애니메이션 재시작 강제
+    ov.classList.add(type === "ok" ? "show-ok" : "show-warn");
   } catch(e){}
 }
 
