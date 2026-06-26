@@ -36,7 +36,7 @@
   .card h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; color: var(--txt2); }
 
   textarea {
-    width: 100%; min-height: 110px; border: 1px solid var(--line);
+    width: 100%; min-height: 240px; border: 1px solid var(--line);
     border-radius: 8px; padding: 10px; font-size: 15px; font-family: inherit;
     resize: vertical;
   }
@@ -88,11 +88,11 @@
   .item {
     display: flex; align-items: center; gap: 10px; padding: 12px 12px;
     border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px;
-    background: #fff;
+    background: #fff; flex-wrap: wrap;
   }
   .item.s-done { background: var(--green-bg); border-color: var(--green); }
   .item.s-partial { background: var(--amber-bg); border-color: var(--amber); }
-  .item .pn { flex: 1; font-size: 16px; font-weight: 600; letter-spacing: 0.3px; }
+  .item .pn { flex: 1; font-size: 16px; font-weight: 600; letter-spacing: 0.3px; min-width: 120px; }
   .item .pn small { display: block; font-size: 11px; font-weight: 400; color: var(--txt2); letter-spacing: 0; margin-top: 1px; }
   .item .cnt {
     font-size: 15px; font-weight: 700; min-width: 56px; text-align: right;
@@ -100,6 +100,17 @@
   .item.s-done .cnt { color: var(--green); }
   .item.s-partial .cnt { color: var(--amber); }
   .item .chk { font-size: 20px; min-width: 24px; text-align: center; }
+  .qty-ctrl {
+    display: flex; gap: 6px; width: 100%; margin-top: 8px;
+    padding-top: 8px; border-top: 1px dashed var(--line);
+  }
+  .qbtn {
+    flex: 1; padding: 9px 0; font-size: 17px; font-weight: 700;
+    border: 1px solid var(--line); border-radius: 8px; background: #fff;
+    color: var(--txt); cursor: pointer; font-family: inherit;
+  }
+  .qbtn:active { background: var(--gray-bg); }
+  .qbtn.qall { font-size: 14px; background: var(--blue-bg); color: var(--blue); border-color: var(--blue); flex: 1.4; }
 
   .manual-row { display: flex; gap: 8px; margin-top: 4px; }
   .manual-row input {
@@ -671,15 +682,28 @@ async function scanFromPhoto(event) {
 function render() {
   let done = 0, left = 0, wrong = 0;
   let html = "";
-  for (let it of items) {
+  for (let idx = 0; idx < items.length; idx++) {
+    let it = items[idx];
     let cls = "", chk = "○";
     if (it.got >= it.need) { cls = "s-done"; chk = "✓"; done++; }
     else if (it.got > 0) { cls = "s-partial"; chk = "◐"; left += (it.need - it.got); }
     else { left += it.need; }
+
+    // 수량 2개 이상인 품목은 +/−/전부 버튼 표시 (묶음 빠른 처리)
+    let qtyControls = "";
+    if (it.need >= 2) {
+      qtyControls = `<div class="qty-ctrl">
+        <button class="qbtn" onclick="adjustQty(${idx},-1)" aria-label="감소">−</button>
+        <button class="qbtn" onclick="adjustQty(${idx},1)" aria-label="증가">+</button>
+        <button class="qbtn qall" onclick="fillAll(${idx})">전부</button>
+      </div>`;
+    }
+
     html += `<div class="item ${cls}">
       <div class="chk">${chk}</div>
       <div class="pn">${it.raw}</div>
       <div class="cnt">${it.got} / ${it.need}</div>
+      ${qtyControls}
     </div>`;
   }
   document.getElementById("itemList").innerHTML = html || '<div class="empty">품목 없음</div>';
@@ -707,6 +731,26 @@ function render() {
 }
 
 function clearWrong(k) { delete wrongScans[k]; render(); }
+
+// 수량 +/− 조절 (묶음 품목)
+function adjustQty(idx, delta) {
+  let it = items[idx];
+  if (!it) return;
+  it.got = Math.max(0, Math.min(it.need, it.got + delta));
+  if (delta > 0 && it.got <= it.need) { vibrate("ok"); }
+  render();
+}
+
+// 전부 받음 (묶음 한 번에 채우기)
+function fillAll(idx) {
+  let it = items[idx];
+  if (!it) return;
+  it.got = it.need;
+  vibrate("ok");
+  screenFlash("ok");
+  flash(`✅ ${it.raw}  전부 받음 (${it.need}개)`, "var(--green)", "var(--green-bg)");
+  render();
+}
 
 function resetAll() {
   if (!confirm("처음부터 다시 시작할까요? 현재 검수 기록이 지워집니다.")) return;
