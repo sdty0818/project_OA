@@ -251,6 +251,19 @@ function extractFromBarcode(raw) {
   return head;
 }
 
+// 줄에 숫자가 3개 이상 있으면 품번 줄로 판단 (부품번호는 항상 숫자가 여러 개).
+// 인사말·안내문 같은 한글 문장은 숫자가 거의 없어 자동으로 걸러짐.
+function looksLikeOrderLine(line) {
+  let digitCount = (line.match(/\d/g) || []).length;
+  return digitCount >= 3;
+}
+
+// "3개", "3 개", "3" 등에서 숫자만 추출. 매칭 안 되면 null.
+function parseQtyToken(tok) {
+  let m = /^(\d+)\s*개?$/.exec(tok);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 // ===== 목록 불러오기 =====
 function loadList() {
   let txt = document.getElementById("pasteInput").value.trim();
@@ -261,17 +274,22 @@ function loadList() {
   for (let line of lines) {
     line = line.trim();
     if (!line) continue;
-    // 끝에 붙은 수량(숫자) 분리: 마지막 토큰이 순수 숫자면 수량
+    if (!looksLikeOrderLine(line)) continue; // 인사말 등 품번 아닌 줄은 무시
+
+    // 끝에 붙은 수량("3" 또는 "3개") 분리
     let parts = line.split(/[\t]+|\s{2,}/).map(s=>s.trim()).filter(Boolean);
     let qty = 1, pn = line;
-    if (parts.length >= 2 && /^\d+$/.test(parts[parts.length-1])) {
-      qty = parseInt(parts[parts.length-1], 10);
+    let q1 = parts.length >= 2 ? parseQtyToken(parts[parts.length-1]) : null;
+    if (q1 !== null) {
+      qty = q1;
       pn = parts.slice(0, -1).join(" ");
     } else {
-      // 단일칸 구분 시도: 마지막 토큰이 숫자면 수량
+      // 단일칸 구분 시도: 마지막 토큰이 수량이면 분리
       let sp = line.split(/\s+/);
-      if (sp.length >= 2 && /^\d+$/.test(sp[sp.length-1]) && sp[sp.length-1].length <= 3) {
-        qty = parseInt(sp[sp.length-1], 10);
+      let lastTok = sp[sp.length-1];
+      let q2 = parseQtyToken(lastTok);
+      if (sp.length >= 2 && q2 !== null && lastTok.replace(/개$/,'').length <= 3) {
+        qty = q2;
         pn = sp.slice(0, -1).join(" ");
       }
     }
