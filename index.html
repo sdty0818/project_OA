@@ -84,6 +84,27 @@
   @keyframes flashOk { 0%{opacity:0} 25%{opacity:0.45} 100%{opacity:0} }
   @keyframes flashWarn { 0%{opacity:0} 25%{opacity:0.5} 100%{opacity:0} }
 
+  /* 확인 누르기 전까지 유지되는 팝업 (긴급 품목 / 목록에 없는 부품) */
+  #modalOverlay {
+    position: fixed; inset: 0; z-index: 10000; display: none;
+    background: rgba(20,20,18,0.6); align-items: center; justify-content: center; padding: 24px;
+  }
+  #modalOverlay.show { display: flex; }
+  .modal-card {
+    background: #fff; border-radius: 16px; padding: 24px 20px; max-width: 400px; width: 100%;
+    text-align: center; box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+  }
+  .modal-card.urgent { border-top: 7px solid var(--red); }
+  .modal-card.notfound { border-top: 7px solid var(--amber); }
+  .modal-title { font-size: 19px; font-weight: 700; margin-bottom: 10px; }
+  .modal-card.urgent .modal-title { color: var(--red); }
+  .modal-card.notfound .modal-title { color: var(--amber); }
+  .modal-body { font-size: 16px; color: var(--txt); white-space: pre-line; margin-bottom: 20px; line-height: 1.6; }
+  .modal-card button {
+    background: var(--txt); color: #fff; font-size: 16px; font-weight: 700;
+    border: none; border-radius: 10px; padding: 13px 0; width: 100%; font-family: inherit;
+  }
+
   /* 목록 */
   .item {
     display: flex; align-items: center; gap: 10px; padding: 12px 12px;
@@ -112,6 +133,15 @@
   .qbtn:active { background: var(--gray-bg); }
   .qbtn.qall { font-size: 14px; background: var(--blue-bg); color: var(--blue); border-color: var(--blue); flex: 1.4; }
 
+  /* 긴급(이베이/urgent) 품목 표시 */
+  .item.is-urgent { border-left: 5px solid var(--red); }
+  .urgent-tag {
+    display: inline-block; font-size: 11px; font-weight: 700; color: #fff;
+    background: var(--red); border-radius: 5px; padding: 1px 6px; margin-right: 6px;
+    vertical-align: middle;
+  }
+  .item.is-urgent .pn { color: var(--red); }
+
   .manual-row { display: flex; gap: 8px; margin-top: 4px; }
   .manual-row input {
     flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 11px;
@@ -133,6 +163,13 @@
 </head>
 <body>
 <div id="flashOverlay"></div>
+<div id="modalOverlay">
+  <div class="modal-card" id="modalCard">
+    <div class="modal-title" id="modalTitle"></div>
+    <div class="modal-body" id="modalBody"></div>
+    <button onclick="closeModal()">확인</button>
+  </div>
+</div>
 <div class="wrap">
   <header>
     <h1>현장 부품 검수</h1>
@@ -264,6 +301,18 @@ function parseQtyToken(tok) {
   return m ? parseInt(m[1], 10) : null;
 }
 
+// 줄 어디든 "이베이"/"urgent"(오타 urgnet/ugrent 포함)가 독립된 단어로 있으면 긴급으로 판단.
+// 대체가능대리점 칸이 함께 붙어와도(예: "이베이 SK CH HJ") 위치와 무관하게 감지됨.
+function extractUrgentTag(line) {
+  let m = /(?:^|\s)(이베이|urgent|urgnet|ugrent)(?:\s|$)/i.exec(line);
+  return m ? true : false;
+}
+
+// 스캔값이 실제 품번처럼 충분히 긴지 판단 (관찰된 QR·관리번호는 8자 이하, 실제 품번은 9자 이상).
+function looksLikePartNumber(key) {
+  return key.length >= 9;
+}
+
 // ===== 목록 불러오기 =====
 function loadList() {
   let txt = document.getElementById("pasteInput").value.trim();
@@ -276,26 +325,35 @@ function loadList() {
     if (!line) continue;
     if (!looksLikeOrderLine(line)) continue; // 인사말 등 품번 아닌 줄은 무시
 
-    // 끝에 붙은 수량("3" 또는 "3개") 분리
+    let urgent = extractUrgentTag(line);
     let parts = line.split(/[\t]+|\s{2,}/).map(s=>s.trim()).filter(Boolean);
     let qty = 1, pn = line;
-    let q1 = parts.length >= 2 ? parseQtyToken(parts[parts.length-1]) : null;
-    if (q1 !== null) {
-      qty = q1;
-      pn = parts.slice(0, -1).join(" ");
+
+    // 우선순위 1: [품번] [수량] (그 뒤에 대체가능대리점 등 칸이 더 있어도 무관)
+    let qFront = parts.length >= 2 ? parseQtyToken(parts[1]) : null;
+    if (qFront !== null) {
+      qty = qFront;
+      pn = parts[0];
     } else {
-      // 단일칸 구분 시도: 마지막 토큰이 수량이면 분리
-      let sp = line.split(/\s+/);
-      let lastTok = sp[sp.length-1];
-      let q2 = parseQtyToken(lastTok);
-      if (sp.length >= 2 && q2 !== null && lastTok.replace(/개$/,'').length <= 3) {
-        qty = q2;
-        pn = sp.slice(0, -1).join(" ");
+      // 우선순위 2(기존 방식): 마지막 칸이 수량인 단순 "품번 수량" 형태
+      let q1 = parts.length >= 2 ? parseQtyToken(parts[parts.length-1]) : null;
+      if (q1 !== null) {
+        qty = q1;
+        pn = parts.slice(0, -1).join(" ");
+      } else {
+        // 우선순위 3: 단일 공백 구분 fallback
+        let sp = line.split(/\s+/);
+        let lastTok = sp[sp.length-1];
+        let q2 = parseQtyToken(lastTok);
+        if (sp.length >= 2 && q2 !== null && lastTok.replace(/개$/,'').length <= 3) {
+          qty = q2;
+          pn = sp.slice(0, -1).join(" ");
+        }
       }
     }
     let key = compareKey(pn);
     if (!key) continue;
-    items.push({ raw: pn.trim(), key: key, need: qty, got: 0 });
+    items.push({ raw: pn.trim(), key: key, need: qty, got: 0, urgent: urgent });
   }
   if (items.length === 0) { alert("인식된 품번이 없습니다. 형식을 확인해주세요."); return; }
   document.getElementById("setupArea").style.display = "none";
@@ -307,6 +365,7 @@ function loadList() {
 // ===== 스캔 처리 =====
 function handleScan(rawValue, source) {
   source = source || "live";  // live(실시간) / photo(사진) / manual(수동입력)
+  if (modalOpen) return;  // 팝업 확인 전에는 추가 스캔 처리 안 함
   let now = Date.now();
   // 중복 방지: 같은 코드 2초 내 무시 (연속 인식 엔진 대응). 단 사진/수동은 항상 처리.
   if (source === "live" && rawValue === lastCode && now - lastTime < 2000) return;
@@ -354,10 +413,15 @@ function handleScan(rawValue, source) {
 
   if (matched) {
     if (matched.got < matched.need) {
+      let wasZero = (matched.got === 0);
       matched.got++;
       let tag = (matched === dsPass) ? "  (DS 예외 통과)" : "";
       flash(`✅ ${matched.raw}${tag}  (${matched.got}/${matched.need})`, "var(--green)", "var(--green-bg)");
       beep(true);
+      // 긴급(이베이/urgent) 품목은 처음 스캔될 때 팝업으로 한 번 더 알림
+      if (matched.urgent && wasZero) {
+        showModal("urgent", "🚨 긴급 품목", `${matched.raw}\n\n이베이·긴급 주문 건입니다.\n픽업 실패 없이 반드시 구매해야 합니다.`);
+      }
     } else {
       flash(`⚠️ ${matched.raw}  이미 수량 다 채움 (${matched.need}개)`, "var(--amber)", "var(--amber-bg)");
       beep(false);
@@ -369,16 +433,34 @@ function handleScan(rawValue, source) {
     flash(`⚠️ 비슷하지만 다름 — 라벨 확인!\n읽은값 ${head}\n발주 ${near.raw}`, "var(--amber)", "var(--amber-bg)");
     beep(false);
   } else {
-    // 목록에 없는 코드(QR·관리번호 등) → 완전히 무시.
-    // 실시간 스캔 중이면 화면도 건드리지 않고 조용히 넘어감(품번 바코드 잡힐 때까지).
-    // 단, 사진/수동 입력은 사용자가 의도적으로 넣은 것이므로 안내만 표시.
-    if (source === "manual" || source === "photo") {
+    // 목록에 없는 코드. 품번처럼 충분히 길면(9자 이상) 팝업으로 알림 —
+    // QR·관리번호(관찰상 8자 이하)는 여전히 조용히 무시.
+    if (looksLikePartNumber(scanKey)) {
+      vibrate("warn");
+      showModal("notfound", "❌ 목록에 없는 부품", `스캔값: ${head}\n\n오늘 발주 목록에 없는 품번입니다.`);
+    } else if (source === "manual" || source === "photo") {
       flash(`해당 값은 발주 목록에 없습니다: ${head}`, "var(--txt2)", "var(--gray-bg)");
     }
     // wrongScans에 기록하지 않음 → "잘못 옴" 카운터 안 올라감
     return; // render 불필요 (목록 상태 변화 없음)
   }
   render();
+}
+
+// 확인 누르기 전까지 유지되는 팝업 (긴급 품목 / 목록에 없는 부품)
+let modalOpen = false;
+function showModal(kind, title, body) {
+  modalOpen = true;
+  let card = document.getElementById("modalCard");
+  card.className = "modal-card " + (kind === "urgent" ? "urgent" : "notfound");
+  document.getElementById("modalTitle").textContent = title;
+  document.getElementById("modalBody").textContent = body;
+  document.getElementById("modalOverlay").classList.add("show");
+  vibrate("warn");
+}
+function closeModal() {
+  modalOpen = false;
+  document.getElementById("modalOverlay").classList.remove("show");
 }
 
 // DS 접미사 유무만 차이나는지 검사 (예: ABC123 ↔ ABC123DS)
@@ -706,6 +788,7 @@ function render() {
     if (it.got >= it.need) { cls = "s-done"; chk = "✓"; done++; }
     else if (it.got > 0) { cls = "s-partial"; chk = "◐"; left += (it.need - it.got); }
     else { left += it.need; }
+    if (it.urgent) cls += " is-urgent";
 
     // 수량 2개 이상인 품목은 +/−/전부 버튼 표시 (묶음 빠른 처리)
     let qtyControls = "";
@@ -716,10 +799,11 @@ function render() {
         <button class="qbtn qall" onclick="fillAll(${idx})">전부</button>
       </div>`;
     }
+    let urgentTag = it.urgent ? `<span class="urgent-tag">긴급</span>` : "";
 
     html += `<div class="item ${cls}">
       <div class="chk">${chk}</div>
-      <div class="pn">${it.raw}</div>
+      <div class="pn">${urgentTag}${it.raw}</div>
       <div class="cnt">${it.got} / ${it.need}</div>
       ${qtyControls}
     </div>`;
