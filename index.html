@@ -308,9 +308,12 @@ function extractUrgentTag(line) {
   return m ? true : false;
 }
 
-// 스캔값이 실제 품번처럼 충분히 긴지 판단 (관찰된 QR·관리번호는 8자 이하, 실제 품번은 9자 이상).
+// 스캔값이 실제 정품 품번 패턴에 맞는지 판단 (길이가 아니라 "생김새"로 판단).
+// 현대·기아·제네시스 품번은 형태가 달라도(숫자시작·1~2글자+숫자시작 등) 앞 3글자 안에 항상 숫자가 나옴.
+// 관리번호·추적코드(예: BZLB52428421처럼 영문이 3글자 넘게 연달아 오는 것)는 이 특징이 없어 자동 제외됨.
 function looksLikePartNumber(key) {
-  return key.length >= 9;
+  let hasDigitEarly = /\d/.test(key.slice(0, 3));
+  return hasDigitEarly && key.length >= 9 && key.length <= 18;
 }
 
 // ===== 목록 불러오기 =====
